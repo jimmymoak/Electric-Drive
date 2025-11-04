@@ -1,0 +1,37 @@
+# Ignore temporary and build files
+[Ll]ibrary/
+[Tt]emp/
+[Oo]bj/
+[Bb]uild/
+[Bb]uilds/
+[Ll]ogs/
+
+# Unity UserSettings folder
+UserSettings/
+
+# Ignore Auto-generated files
+*.csproj
+*.unityproj
+*.sln
+*.suo
+*.tmp
+*.user
+*.userprefs
+*.pidb
+*.booproj
+*.svd
+
+# Ignore Unity-generated files
+*.pidb.meta
+*.pdb.meta
+*.mdb.meta
+
+# Ignore other files
+*.bak
+*.swp
+*.tmp
+*.orig
+*.old
+
+# Ignore the asset database
+*.assetdatabase
