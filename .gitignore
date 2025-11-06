@@ -33,5 +33,3 @@ UserSettings/
 *.orig
 *.old
 
-# Ignore the asset database
-*.assetdatabase
