@@ -1,0 +1,15 @@
+fileFormatVersion: 2
+guid: 13f82ca77504b754ca7fe84c6d5e07d9
+NativeFormatImporter:
+  externalObjects: {}
+  mainObjectFileID: 8574412962073106934
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
+AssetOrigin:
+  serializedVersion: 1
+  productId: 42671
+  packageName: Terrain Stitcher
+  packageVersion: 1.5
+  assetPath: Assets/NatureManufacture Assets/Terrain Stitch/Standard Assets Textures/Layers/layer_GoodDirt.terrainlayer
+  uploadId: 665847

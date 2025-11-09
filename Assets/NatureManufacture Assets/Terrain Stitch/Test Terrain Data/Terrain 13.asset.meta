@@ -1,0 +1,16 @@
+fileFormatVersion: 2
+guid: b10ea698698cc44228958846f134b4a4
+timeCreated: 1435008766
+licenseType: Store
+NativeFormatImporter:
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
+AssetOrigin:
+  serializedVersion: 1
+  productId: 42671
+  packageName: Terrain Stitcher
+  packageVersion: 1.5
+  assetPath: Assets/NatureManufacture Assets/Terrain Stitch/Test Terrain Data/Terrain
+    13.asset
+  uploadId: 665847

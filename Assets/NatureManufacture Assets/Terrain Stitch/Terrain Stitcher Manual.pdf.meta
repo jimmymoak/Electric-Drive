@@ -1,0 +1,15 @@
+fileFormatVersion: 2
+guid: 79eeef9a23d6461438fe5769d3f63ad5
+timeCreated: 1438116171
+licenseType: Store
+DefaultImporter:
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
+AssetOrigin:
+  serializedVersion: 1
+  productId: 42671
+  packageName: Terrain Stitcher
+  packageVersion: 1.5
+  assetPath: Assets/NatureManufacture Assets/Terrain Stitch/Terrain Stitcher Manual.pdf
+  uploadId: 665847
