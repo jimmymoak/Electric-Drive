@@ -1,60 +1,64 @@
-using System.Text;
+using System.Collections;
+using System.Collections.Generic;
 using UnityEngine;
 
-/// <summary>
-/// - Visiual lerp removed; use Rigidbody interpolation instead
-/// - Input snapshot
-/// - Ground check: touch at first, else SphereCastNonAlloc
-/// - Reduced unnecessary assignments, reduced GC pressure
-/// </summary>
-[RequireComponent(typeof(CapsuleCollider))]
-[RequireComponent(typeof(Rigidbody))]
+// This class is based off the movement of the game Rust, it uses a state machine to determine the tpye of movement.
+// It calculates where an invsibile physics body is and then lerps the visual player body to that position.
+// It does not do player rotation or fps looking around.
 public class PlayerMovement : MonoBehaviour
 {
-    // Admin / NoClip
-    [Header("Admin / NoClip")]
-    [SerializeField] private bool isAdmin;
-    [SerializeField] private bool adminNoClip;
+    // Eventually move out of this class
+    private bool isAdmin;
+    private bool adminNoClip;
 
-    //  Movement Config
-    [Header("Movement Config")]
-    [SerializeField, Range(0f, 1f)] private float drag = 0f;
-    [SerializeField] private float maxAngleWalking = 50f;
-    [SerializeField] private float maxAngleClimbing = 60f;
-    [SerializeField] private float maxAngleSliding = 90f;
-    [SerializeField] private float maxVelocity = 50f;
+    // Movement Configuration
+    private float drag = 0;
+    private float maxAngleWalking = 50f;
 
-    // Components 
+    private float maxAngleClimbing = 60f;
+
+    private float maxAngleSliding = 90f;
+    private float maxVelocity = 50f;
+
+    // Movement Flags
+    private bool wasFlying;
+    private bool isFlying;
+    private bool grounded;
+    private bool climbing;
+    private bool sliding;
+
+    private bool wasGrounded;
+    private bool wasClimbing;
+    private bool wasSliding;
+    private bool wasJumping;
+    private bool wasFalling;    
+    private bool jumping;
+    private bool falling;
+
+    // Components
     private CapsuleCollider capsule;
     public Rigidbody rb;
-
-    // Movement Vars 
-    private Vector3 groundNormalNew = Vector3.up;
-    private Vector3 groundNormal = Vector3.up;
-    private float groundAngleNew = float.MaxValue;
-    private float groundAngle = 0f;
+    public Transform playerVisualBody;
+    // Movement Variables
+    private Vector3 groundNormalNew;
+    private Vector3 groundNormal;
+    private float groundAngleNew;
+    private float groundAngle;
     private float groundTime;
     private float landTime;
+    private Vector3 previousPosition;
+    private Vector3 previousVelocity;
     private float jumpTime;
 
-    // Public Movement Vars 
-    [Header("Public Movement Variables")]
-    public Vector3 TargetMovement;
-    public float Running;   // 0..1
-    public float Crouching; // 0..1
-    public bool hasMovingParent;
-
-    //  NoClip Speeds & Physics 
     [Header("Private Movement Variables")]
     [SerializeField] private float noClipSpeed = 10f;
     [SerializeField] private float noClipCrouchSpeed = 2f;
     [SerializeField] private float noClipSprintSpeed = 50f;
     [SerializeField] private LayerMask collisionLayers;
     [SerializeField] private float gravityMultiplier = 2.5f;
-    [SerializeField] private PhysicMaterial highFrictionMaterial;
-    [SerializeField] private PhysicMaterial zeroFrictionMaterial;
+    [SerializeField] private PhysicsMaterial highFrictionMaterial;
+    [SerializeField] private PhysicsMaterial zeroFrictionMaterial;
 
-    // Capsule Collider Vars 
     [Header("Capsule Collider Variables")]
     [SerializeField] private float capsuleHeight;
     [SerializeField] private float capsuleHeightCrouched;
@@ -62,105 +66,119 @@ public class PlayerMovement : MonoBehaviour
     [SerializeField] private float capsuleCenterCrouched;
     [SerializeField] private float gravityTestRadius = 0.2f;
 
-    // State & Flags 
-    private enum MoveState : byte { Grounded, Climbing, Sliding, Airborne, Flying }
-    private MoveState state = MoveState.Airborne;
-    private bool wasFlying, jumping, falling;
-    private bool wasJumping, wasFalling;
-    private bool hadContactsThisStep;
-
-    // Cache / Constants 
-    private static readonly RaycastHit[] HitsCache = new RaycastHit[4];
-    private static readonly RaycastHit[] hitsCache = new RaycastHit[16];
-    private PhysicMaterial currentMat;
-    private float fixedDt;
-
-    // Input Snapshot 
-    private struct InputSnapshot
-    {
-        public bool f, b, l, r, run, crouch, jump, jumpJust;
-    }
-    private InputSnapshot input;
-
-    // Debug Throttle 
-#if DEBUG
-    private float nextDebugTime;
-#endif
-
-    // Unity Hooks 
-    private void Awake()
+    [Header("Public Movement Variables")]
+    public Vector3 TargetMovement;
+    public float Running;
+    public float Crouching;
+    public bool hasMovingParent;
+    
+    void Awake()
     {
         capsule = GetComponent<CapsuleCollider>();
-        rb      = GetComponent<Rigidbody>();
-
-        // Rigidbody visiual smoothing
-        rb.interpolation = RigidbodyInterpolation.Interpolate;
-        rb.collisionDetectionMode = CollisionDetectionMode.ContinuousSpeculative;
-        rb.freezeRotation = true; // Lock rotation 
-
-        // Capsule vars init (default to current if zero)
-        if (capsuleHeight <= 0f)
-            capsuleHeight = capsule.height;
-
-        if (capsuleHeightCrouched <= 0f)
-            capsuleHeightCrouched = capsule.height * 0.5f;
-
-        if (Mathf.Approximately(capsuleCenter, 0f))
-            capsuleCenter = capsule.center.y;
-            
-        if (Mathf.Approximately(capsuleCenterCrouched, 0f)) 
-            capsuleCenterCrouched = capsule.center.y * 0.5f;
-
-        currentMat = capsule.material;
-        fixedDt = Time.fixedDeltaTime;
-    }
-
-    private void Update()
-    {
-        // input snapshot 
-        var im = InputManager.Instance;
-        input.f        = im.IsActionDown(InputManager.ActionType.Forward);
-        input.b        = im.IsActionDown(InputManager.ActionType.Backward);
-        input.l        = im.IsActionDown(InputManager.ActionType.Left);
-        input.r        = im.IsActionDown(InputManager.ActionType.Right);
-        input.run      = im.IsActionDown(InputManager.ActionType.Run);
-        input.crouch   = im.IsActionDown(InputManager.ActionType.Crouch);
-        input.jumpJust = im.IsActionJustDown(InputManager.ActionType.Jump);
-        input.jump     = im.IsActionDown(InputManager.ActionType.Jump);
+        rb = GetComponent<Rigidbody>();
         
-#if DEBUG
+        // Initialize capsule dimensions if not set
+        if (capsuleHeight == 0)
+            capsuleHeight = capsule.height;
+        if (capsuleHeightCrouched == 0)
+            capsuleHeightCrouched = capsule.height * 0.5f;
+        if (capsuleCenter == 0)
+            capsuleCenter = capsule.center.y;
+        if (capsuleCenterCrouched == 0)
+            capsuleCenterCrouched = capsule.center.y * 0.5f;
+    }
+
+    void Start()
+    {
+        previousPosition = transform.localPosition;
+    }
+
+    void FixedUpdate()
+    {
+        PhysicsUpdate();
+    }
+    public void PhysicsUpdate()
+    { 
+        DetermineInitialFlags();
+
+        // Apply Movement Based off Flags
+        this.UpdateVelocity();
+        this.UpdateGravity();
+
+        // Finish Player State
+        DetermineFinalFlags();
+    }
+
+    void Update()
+    {
+        // Determine desired movement every frame
+        FrameUpdate();
+        
+        // Update debug information
         UpdateDebugInfo();
-#endif
     }
 
-    private void FixedUpdate()
+    public void FrameUpdate()
     {
-        hadContactsThisStep = false; // reset for this step
+        // First determine movement type and then apply movement and lerp the visual player body
+        DetermineMovementType();
 
-        DetermineMovementType(); // input -> target movement
-        PhysicsUpdate();         // velocity, gravity, state
-    }
-
-    private void OnCollisionEnter(Collision c)
-    {
-        CollisionCheck(c);
-    }
-
-    private void OnCollisionStay(Collision c)
-    {
-        hadContactsThisStep = true;
-        CollisionCheck(c);
-    }
-
-    // High-level flow 
-    private void DetermineMovementType()
-    {
-        wasFlying = (state == MoveState.Flying);
-
-        bool isFlyingNow = isAdmin && adminNoClip;
-        if (isFlyingNow)
+        // Reset rotation to prevent unwanted rotation, since this is just physics 
+        transform.rotation = Quaternion.identity;
+        
+        // Set capsule as trigger when flying
+        capsule.isTrigger = isFlying;
+        
+        // Check if player can move (you can add your own movement restrictions here)
+        bool canPlayerMove = true; // Replace with your movement restriction logic
+        if (!canPlayerMove)
         {
-            state = MoveState.Flying;
+            Vector3 playerLocalPosition = transform.localPosition;
+            transform.localPosition = playerLocalPosition;
+            previousPosition = playerLocalPosition;
+            return;
+        }
+        
+        // Check if player is mounted (you can add your own mounted logic here)
+        bool isPlayerMounted = false; // Replace with your mounted logic
+        if (isPlayerMounted)
+        {
+            Vector3 playerLocalPosition = transform.localPosition;
+            transform.localPosition = playerLocalPosition;
+            previousPosition = playerLocalPosition;
+            return;
+        }
+        
+        // If On a Moving Platform, skip visual interpolation
+        if (hasMovingParent)
+        {
+            return;
+        }
+
+        // Calculate interpolation factor between physics frames
+        float interpolationFactor = (UnityEngine.Time.time - UnityEngine.Time.fixedTime) / UnityEngine.Time.fixedDeltaTime;
+        
+        // Interpolate between previous and current position
+        Vector3 interpolatedPosition = Vector3.Lerp(previousPosition, transform.localPosition, interpolationFactor);
+        
+        // Smooth Y-axis movement specifically
+        interpolatedPosition.y = Mathf.Lerp(transform.localPosition.y, interpolatedPosition.y, UnityEngine.Time.smoothDeltaTime * 15f);
+        
+        playerVisualBody.localPosition = interpolatedPosition;
+    }
+
+    // Ideal execution order: ClientInput -> FixedUpdate -> FrameUpdate
+    public void DetermineMovementType()
+    {
+        wasFlying = isFlying;
+
+        if (isAdmin == true)
+        {
+            isFlying = adminNoClip;
+        }
+
+        if (isFlying == true)
+        {
             NoClipMovement();
         }
         else
@@ -169,157 +187,355 @@ public class PlayerMovement : MonoBehaviour
         }
     }
 
-    private void PhysicsUpdate()
-    {
-        DetermineInitialFlags();
 
-        UpdateVelocity();
-        UpdateGravity();
-
-        DetermineFinalFlags();
-    }
-
-    // Movement Modes 
     private void NoClipMovement()
     {
-        // target direction
         TargetMovement = Vector3.zero;
-
-        // Transform directions
-        Vector3 fwd = transform.forward;
-        Vector3 right = transform.right;
-
-        if (input.f) TargetMovement += fwd;
-        if (input.b) TargetMovement -= fwd;
-        if (input.l) TargetMovement -= right;
-        if (input.r) TargetMovement += right;
-        if (input.jump) TargetMovement += Vector3.up;
-
         float speed = noClipSpeed;
 
-        if (input.run)
+        if (InputManager.Instance.IsActionDown(InputManager.ActionType.Forward))
         {
-            if (Mathf.Approximately(TargetMovement.x, 0f) &&
-                Mathf.Approximately(TargetMovement.z, 0f) &&
-                TargetMovement.y <= 0f)
+            TargetMovement += transform.forward;
+        }
+
+        if (InputManager.Instance.IsActionDown(InputManager.ActionType.Backward))
+        {
+            TargetMovement -= transform.forward;
+        }
+
+        if (InputManager.Instance.IsActionDown(InputManager.ActionType.Left))
+        {
+            TargetMovement -= transform.right;
+        }
+
+        if (InputManager.Instance.IsActionDown(InputManager.ActionType.Right))  
+        {
+            TargetMovement += transform.right;
+        }
+
+        if (InputManager.Instance.IsActionDown(InputManager.ActionType.Jump))
+        {
+            TargetMovement += transform.up;
+        }
+
+        // Determine Speed
+        if (InputManager.Instance.IsActionDown(InputManager.ActionType.Run))
+        {
+            // If target movement purely in the negative y direction, set it to normal speed
+            if (TargetMovement.x == 0 && TargetMovement.z == 0 && TargetMovement.y <= 0)
             {
-                TargetMovement -= Vector3.up; // down when no horizontal movement
+                TargetMovement -= transform.up;
                 speed = noClipSpeed;
                 TargetMovement = TargetMovement.normalized * speed;
                 return;
             }
+
             speed = noClipSprintSpeed;
         }
 
-        if (input.crouch)
+        if (InputManager.Instance.IsActionDown(InputManager.ActionType.Crouch))
+        {
             speed = noClipCrouchSpeed;
+        }
 
-        TargetMovement = TargetMovement.sqrMagnitude > 0f ? TargetMovement.normalized * speed : Vector3.zero;
+        // Set Movement
+        TargetMovement = TargetMovement.normalized * speed;
     }
 
     private void WalkingMovement()
     {
         TargetMovement = Vector3.zero;
-
-        Vector3 fwd = transform.forward;
+        
+        // Get movement direction from transform
+        Vector3 forward = transform.forward;
         Vector3 right = transform.right;
+        
+        if (InputManager.Instance.IsActionDown(InputManager.ActionType.Forward))
+        {
+            TargetMovement += forward;
+        }
+        if (InputManager.Instance.IsActionDown(InputManager.ActionType.Backward))
+        {
+            TargetMovement -= forward;
+        }
+        if (InputManager.Instance.IsActionDown(InputManager.ActionType.Left))
+        {
+            TargetMovement -= right;
+        }
+        if (InputManager.Instance.IsActionDown(InputManager.ActionType.Right))
+        {
+            TargetMovement += right;
+        }
 
-        if (input.f) TargetMovement += fwd;
-        if (input.b) TargetMovement -= fwd;
-        if (input.l) TargetMovement -= right;
-        if (input.r) TargetMovement += right;
+        if (this.jumping || (this.falling && UnityEngine.Time.time - this.groundTime > 0.3f))
+        {
+            grounded = false;
+        }
+        else
+        {
+            grounded = true;
+        }
 
-        // Sprint (only forward)
-        bool onlyForward = input.f && !input.l && !input.b && !input.r;
-        bool wantsRun = onlyForward && input.run;
-        bool wantsCrouch = input.crouch;
-        bool wantsJump = input.jumpJust;
+        // Only allow sprinting in the forward direction
+        bool isOnlyMovingFoward = InputManager.Instance.IsActionDown(InputManager.ActionType.Forward)
+                                  && (!InputManager.Instance.IsActionDown(InputManager.ActionType.Left)
+                                      && !InputManager.Instance.IsActionDown(InputManager.ActionType.Backward)
+                                      && !InputManager.Instance.IsActionDown(InputManager.ActionType.Right));
+
+        bool wantsRun = isOnlyMovingFoward && InputManager.Instance.IsActionDown(InputManager.ActionType.Run);
+        bool wantsCrouch = InputManager.Instance.IsActionDown(InputManager.ActionType.Crouch);
+        bool wantsJump = InputManager.Instance.IsActionJustDown(InputManager.ActionType.Jump);
 
         HandleRunning(wantsRun);
         HandleCrouch(wantsCrouch);
 
-        // Drag application
+        TargetMovement = Vector3.Lerp(TargetMovement, Vector3.zero, drag);
+        
         if (TargetMovement != Vector3.zero)
         {
-            TargetMovement = Vector3.Lerp(TargetMovement, Vector3.zero, drag);
             TargetMovement = TargetMovement.normalized * GetSpeed(Running, Crouching);
         }
-        else
+        if (TargetMovement.magnitude < 0.1f)
         {
-            TargetMovement = Vector3.zero;
             Running = 0f;
         }
-
+        
         HandleJump(wantsJump);
     }
 
-    // Helpers
-    private float lastRunning = -1f, lastCrouching = -1f;
-
-    private void HandleRunning(bool wantsRun) 
+    private void HandleRunning(bool wantsRun)
     {
-        float target = wantsRun ? Mathf.Lerp(1f, 0.6f, Mathf.Clamp01(groundAngle / maxAngleWalking)) : 0f;
-        if (!Mathf.Approximately(target, lastRunning))
-        {
-            Running = lastRunning = target;
-        }
+        Running = (wantsRun ? Mathf.Lerp(1f, 0.6f, Mathf.Clamp01(this.groundAngle / this.maxAngleWalking)) : 0f);
     }
 
     private void HandleCrouch(bool wantsCrouch)
     {
-        float target = wantsCrouch ? 1f : GetForcedCrouchAmount();
-        if (!Mathf.Approximately(target, lastCrouching))
-        {
-            Crouching = lastCrouching = target;
-            // capsule settings
-            capsule.height = Mathf.Lerp(capsuleHeight, capsuleHeightCrouched, Crouching);
-            var c = capsule.center;
-            c.y = Mathf.Lerp(capsuleCenter, capsuleCenterCrouched, Crouching);
-            capsule.center = c;
-        }
+        Crouching = (wantsCrouch ? 1f : GetForcedCrouchAmount());
+        this.capsule.height = Mathf.Lerp(this.capsuleHeight, this.capsuleHeightCrouched, Crouching);
+        this.capsule.center = new Vector3(0f, Mathf.Lerp(this.capsuleCenter, this.capsuleCenterCrouched, Crouching), 0f);
     }
 
     private float GetForcedCrouchAmount()
     {
-        // CheckCapsule (better than SphereCast) 
-        float radius = capsule.radius - 0.05f;
-        Vector3 start = transform.position + Vector3.up * radius;
-        float headHeight = Mathf.Lerp(capsuleHeight, capsuleHeightCrouched, 0f);
-        Vector3 end = start + Vector3.up * (headHeight - radius * 2f);
-
-        bool blocked = Physics.CheckCapsule(start, end, radius, collisionLayers, QueryTriggerInteraction.Ignore);
-        return blocked ? 1f : 0f;
+        Vector3 sphereStartPosition = transform.position + new Vector3(0f, capsule.radius, 0f);
+        float sphereRadius = capsule.radius - 0.1f;
+        float moveDistance = capsuleHeight - capsule.radius - sphereRadius + 0.2f;
+        
+        // Use Physics.SphereCast to check for ceiling
+        RaycastHit hit;
+        Vector3 castStart = sphereStartPosition;
+        Vector3 castDirection = transform.up;
+        
+        if (Physics.SphereCast(castStart, sphereRadius, castDirection, out hit, moveDistance, collisionLayers))
+        {
+            float heightDifference = hit.point.y + sphereRadius - this.rb.transform.position.y - 0.2f;
+            float crouchAmount = Mathf.InverseLerp(this.capsuleHeight, this.capsuleHeightCrouched, heightDifference);
+            return crouchAmount;
+        }
+        
+        return 0f;
     }
 
     private void HandleJump(bool wantsJump, bool jumpInDirection = false)
     {
-        if (!wantsJump || !CanJump()) return;
-        Jump(jumpInDirection);
+        if (!wantsJump || !this.CanJump())
+        {
+            return;
+        }
+
+        this.Jump(jumpInDirection);
     }
 
     private bool CanJump()
     {
-        return Time.time - jumpTime >= 0.5f &&
-                (Time.time - groundTime <= 0.1f &&
-                Time.time - landTime >= 0.1f &&
-               (Time.time - landTime >= 0.2f || state != MoveState.Sliding));
+        return UnityEngine.Time.time - this.jumpTime >= 0.5f && (UnityEngine.Time.time - this.groundTime <= 0.1f && UnityEngine.Time.time - this.landTime >= 0.1f && (UnityEngine.Time.time - this.landTime >= 0.2f || !this.sliding));
     }
 
     public void BlockJump(float duration)
     {
         if (duration > 0f)
-            jumpTime = Time.time + duration - 0.5f;
+        {
+            this.jumpTime = UnityEngine.Time.time + duration - 0.5f;
+        }
     }
 
     private void Jump(bool jumpInDirection = false)
-    {
-        state = MoveState.Airborne;
-        jumping = true;
-        falling = false;
-        jumpTime = Time.time;
+    {		
+        //if (Player) // Check if player can jump
 
-        Vector3 add = jumpInDirection ? transform.forward * 9f : Vector3.up * 9f;
-        rb.velocity += Vector3.Lerp(add, Vector3.zero, drag);
+        this.sliding = false;
+        this.climbing = false;
+        this.grounded = false;
+        this.jumping = true;
+        this.jumpTime = UnityEngine.Time.time;
+
+        if (jumpInDirection)
+        {
+            this.rb.linearVelocity += Vector3.Lerp(transform.forward * 9f, Vector3.zero, drag);
+        }
+        else
+        {
+            this.rb.linearVelocity += Vector3.Lerp(Vector3.up * 9f, Vector3.zero, drag);
+        }
+    }
+
+    private Vector3 FallVelocity()
+    {
+        return new Vector3(0f, Mathf.Min(0f, this.rb.linearVelocity.y), 0f);
+    }
+
+    private void UpdateVelocity()
+    {
+        Vector3 currentVelocity = this.rb.linearVelocity;
+
+        if (this.wasFlying && !this.isFlying)
+        {
+            currentVelocity = Vector3.zero;
+        }
+
+        if (this.isFlying)
+        {
+            currentVelocity += (TargetMovement - currentVelocity) * Mathf.Clamp01(10f * Time.fixedDeltaTime);
+        }
+        else if (this.grounded || this.climbing)
+        {
+            Vector3 groundNormalHorizontal = new Vector3(this.groundNormal.x, 0f, this.groundNormal.z).normalized;
+            Vector3 slopeAlignedTargetMovement = TargetMovement + groundNormalHorizontal * Mathf.Max(0f, -Vector3.Dot(groundNormalHorizontal, TargetMovement));
+            float blendFactor = this.groundAngle - this.maxAngleWalking + 0.5f;
+            currentVelocity = Vector3.Lerp(TargetMovement, slopeAlignedTargetMovement, blendFactor) + this.FallVelocity();
+        }
+        else if (this.sliding)
+        {
+            Vector3 xzVelocity = new Vector3(currentVelocity.x, 0f, currentVelocity.z);
+            currentVelocity += (TargetMovement - xzVelocity) * Mathf.Clamp01(3f * Time.fixedDeltaTime);
+            currentVelocity = Vector3.Lerp(currentVelocity, (currentVelocity - xzVelocity) * 0.2f, this.drag);
+        }
+        else
+        {
+            Vector3 xzVelocity = new Vector3(currentVelocity.x, 0f, currentVelocity.z);
+            currentVelocity += (TargetMovement - xzVelocity) * Mathf.Clamp01(3f * Time.fixedDeltaTime);
+            currentVelocity = Vector3.Lerp(currentVelocity, (currentVelocity - xzVelocity) * 0.2f, this.drag);
+        }   
+
+        if (!this.isFlying)
+        {
+            float currentSpeedMagnitude = currentVelocity.magnitude;
+            float maxAllowedSpeed = Mathf.Max(this.maxVelocity, TargetMovement.magnitude);
+            if (currentSpeedMagnitude > maxAllowedSpeed)
+            {
+                currentVelocity *= maxAllowedSpeed / currentSpeedMagnitude;
+            }
+        }
+
+        this.rb.linearVelocity = currentVelocity;
+    }
+
+    private void UpdateGravity()
+    {
+        this.capsule.material = ((TargetMovement.magnitude <= 0f) ? this.highFrictionMaterial : this.zeroFrictionMaterial);
+        if (this.isFlying)
+        {
+            return;
+        }
+        Ray groundCheckRay = new Ray(this.capsule.bounds.center, Vector3.down);
+        float sphereCastDistance = this.capsule.bounds.extents.y;
+        bool shouldApplyGravity = (!this.grounded && !this.climbing) || !UnityEngine.Physics.SphereCast(groundCheckRay, this.gravityTestRadius, sphereCastDistance, collisionLayers);
+        if (shouldApplyGravity)
+        {
+            this.rb.AddForce(UnityEngine.Physics.gravity * this.gravityMultiplier * this.rb.mass);
+            this.capsule.material = this.zeroFrictionMaterial;
+        }
+    }
+
+    private void DetermineInitialFlags()
+    {
+        this.transform.rotation = Quaternion.identity;
+
+        isAdmin = false;
+        adminNoClip = false;
+
+        this.groundNormal = groundNormalNew;
+        this.groundAngle = groundAngleNew;
+        this.grounded = (this.groundAngle <= this.maxAngleWalking 
+                                          && !this.jumping);
+
+        this.climbing = (this.groundAngle <= this.maxAngleClimbing 
+                                          && !this.jumping 
+                                          && !this.grounded);
+
+        this.sliding = (this.groundAngle <= this.maxAngleSliding 
+                                         && !this.jumping 
+                                         && !this.grounded
+                                         && !this.climbing);
+
+        this.jumping = (this.rb.linearVelocity.y > 0f
+                                           && !this.grounded 
+                                           && !this.climbing 
+                                           && !this.sliding);
+
+        this.falling = (this.rb.linearVelocity.y < 0f
+                                         && !this.grounded 
+                                         && !this.climbing 
+                                         && !this.sliding 
+                                         && !this.jumping);
+
+        if (!this.isFlying && (this.wasJumping || this.wasFalling)
+                           && !this.jumping 
+                           && !this.falling
+                           && Time.time - this.groundTime > 0.3f)
+        {
+            this.landTime = Time.time;
+        }
+        
+        if (this.grounded || this.climbing || this.sliding)
+        {
+            this.groundTime = Time.time;
+        }
+
+    }
+
+    private void DetermineFinalFlags()
+    {
+        this.wasGrounded = this.grounded;
+        this.wasClimbing = this.climbing;
+        this.wasSliding = this.sliding;
+        this.wasJumping = this.jumping;
+        this.wasFalling = this.falling;
+        this.previousPosition = transform.localPosition; // Visual interpolation at 144hz not physics's 60hz, since Update goes at 50hz and first sets the position then does the Tick
+        this.previousVelocity = rb.linearVelocity;
+        this.groundAngleNew = float.MaxValue;
+        this.groundNormalNew = Vector3.up;
+    }
+
+    // Gets touching ground normals only below feet
+    void CollisionCheck(Collision collision)
+    {
+        float groundCheckHeight = capsule.bounds.min.y + capsule.radius;
+
+        foreach (ContactPoint contact in collision.contacts)
+        {
+            if (contact.point.y <= groundCheckHeight)
+            {
+                Vector3 normal = contact.normal;
+                float angle = Vector3.Angle(normal, Vector3.up);
+
+                if (angle < groundAngleNew)
+                {
+                    groundAngleNew = angle;
+                    groundNormalNew = normal;
+                }
+            }
+        }
+    }
+
+    void OnCollisionEnter(Collision collision)
+    {
+        CollisionCheck(collision);
+    }
+
+    void OnCollisionStay(Collision collision)
+    {
+        CollisionCheck(collision);
     }
 
     public float GetSpeed(float running, float ducking)
@@ -327,171 +543,21 @@ public class PlayerMovement : MonoBehaviour
         return Mathf.Lerp(Mathf.Lerp(2.8f, 5.5f, running), 1.7f, ducking);
     }
 
-    // Physics core 
-    private void UpdateVelocity()
-    {
-        Vector3 v = rb.velocity;
-
-        if (wasFlying && state != MoveState.Flying)
-            v = Vector3.zero;
-
-        if (state == MoveState.Flying)
-        {
-            // NoClip damping
-            float t = Mathf.Clamp01(10f * fixedDt);
-            v += (TargetMovement - v) * t;
-        }
-        else if (state == MoveState.Grounded || state == MoveState.Climbing)
-        {
-            Vector3 groundNormalHorizontal = new Vector3(groundNormal.x, 0f, groundNormal.z).normalized;
-            Vector3 slopeAlignedTarget = TargetMovement + groundNormalHorizontal * Mathf.Max(0f, -Vector3.Dot(groundNormalHorizontal, TargetMovement));
-            float blend = Mathf.Clamp01((groundAngle - maxAngleWalking + 0.5f) / Mathf.Max(0.0001f, maxAngleSliding - maxAngleWalking));
-            v = Vector3.Lerp(TargetMovement, slopeAlignedTarget, blend) + FallVelocity(v);
-        }
-        else
-        {
-            // fly damping
-            Vector3 xz = new Vector3(v.x, 0f, v.z);
-            float t = Mathf.Clamp01(3f * fixedDt);
-            xz += (TargetMovement - xz) * t;
-            v = new Vector3(xz.x, v.y, xz.z);
-            v = Vector3.Lerp(v, (v - xz) * 0.2f, drag);
-        }
-
-        // Max velocity clamp if not flying
-        if (state != MoveState.Flying)
-        {
-            float maxAllowed = Mathf.Max(maxVelocity, TargetMovement.magnitude);
-            float sq = v.sqrMagnitude;
-            float maxSq = maxAllowed * maxAllowed;
-            if (sq > maxSq)
-                v *= (maxAllowed / Mathf.Sqrt(sq));
-        }
-
-        rb.velocity = v;
-    }
-
-    private static Vector3 FallVelocity(in Vector3 v) => new Vector3(0f, Mathf.Min(0f, v.y), 0f);
-
-    private void UpdateGravity()
-    {
-        if (state == MoveState.Flying) return;
-
-        bool shouldApplyGravity;
-
-        if (hadContactsThisStep)
-        {
-            shouldApplyGravity = false;
-        }
-        else
-        {
-            var center = capsule.bounds.center;
-            int count = Physics.SphereCastNonAlloc(new Ray(center, Vector3.down), gravityTestRadius, HitsCache, dist, collisionLayers, QueryTriggerInteraction.Ignore);
-            shouldApplyGravity = (count == 0);
-            shouldApplyGravity = (count == 0);
-        }
-
-        if (shouldApplyGravity)
-        {
-            rb.AddForce(Physics.gravity * gravityMultiplier, ForceMode.Acceleration);
-            SetCapsuleMaterial(zeroFrictionMaterial);
-        }
-        else
-        {
-            // friction control
-            if (TargetMovement.sqrMagnitude <= 0.0001f) SetCapsuleMaterial(highFrictionMaterial);
-            else SetCapsuleMaterial(zeroFrictionMaterial);
-        }
-    }
-
-    private void DetermineInitialFlags()
-    {
-        // Ground/Climb/Slide decision
-        groundNormal = groundNormalNew;
-        groundAngle  = groundAngleNew;
-
-        bool groundedNow = (groundAngle <= maxAngleWalking && !jumping);
-        bool climbingNow = (!groundedNow && groundAngle <= maxAngleClimbing && !jumping);
-        bool slidingNow  = (!groundedNow && !climbingNow && groundAngle <= maxAngleSliding && !jumping);
-
-        if (state != MoveState.Flying)
-        {
-            if (groundedNow) state = MoveState.Grounded;
-            else if (climbingNow) state = MoveState.Climbing;
-            else if (slidingNow) state = MoveState.Sliding;
-            else state = MoveState.Airborne;
-        }
-
-        jumping = (rb.velocity.y > 0f && state == MoveState.Airborne);
-        falling = (rb.velocity.y < 0f && state == MoveState.Airborne);
-
-        if (state != MoveState.Flying && (wasJumping || wasFalling) && !jumping && !falling && Time.time - groundTime > 0.3f)
-            landTime = Time.time;
-
-        if (state == MoveState.Grounded || state == MoveState.Climbing || state == MoveState.Sliding)
-            groundTime = Time.time;
-    }
-
-    private void DetermineFinalFlags()
-    {
-        wasJumping = jumping;
-        wasFalling = falling;
-
-        // reset for next step
-        groundAngleNew  = float.MaxValue;
-        groundNormalNew = Vector3.up;
-    }
-
-    // Collision / Ground Solve 
-    private void CollisionCheck(Collision collision)
-    {
-        float groundCheckHeight = capsule.bounds.min.y + capsule.radius;
-
-        // En küçük açı (en dik olmayan yer) zemin kabul edilecek
-        foreach (var contact in collision.contacts)
-        {
-            if (contact.point.y <= groundCheckHeight)
-            {
-                Vector3 n = contact.normal;
-                float angle = Vector3.Angle(n, Vector3.up);
-                if (angle < groundAngleNew)
-                {
-                    groundAngleNew = angle;
-                    groundNormalNew = n;
-                }
-            }
-        }
-    }
-
-    //  Utils 
-    private void SetCapsuleMaterial(PhysicMaterial mat)
-    {
-        if (currentMat == mat) return;
-        capsule.material = mat;
-        currentMat = mat;
-    }
-
-#if DEBUG
     private void UpdateDebugInfo()
     {
-        if (Time.unscaledTime < nextDebugTime) return;
-        nextDebugTime = Time.unscaledTime + 0.2f;
-
-        var sb = new StringBuilder(256);
-        sb.Append("State: ").Append(state)
-          .Append("\nJumping: ").Append(jumping)
-          .Append("\nFalling: ").Append(falling)
-          .Append("\nGround Time: ").Append((Time.time - groundTime).ToString("F2")).Append("s")
-          .Append("\nLand Time: ").Append((Time.time - landTime).ToString("F2")).Append("s")
-          .Append("\nJump Time: ").Append((Time.time - jumpTime).ToString("F2")).Append("s")
-          .Append("\nPos: ").Append(transform.position)
-          .Append("\nVel: ").Append(rb.velocity)
-          .Append("\nTarget: ").Append(TargetMovement)
-          .Append("\nGround Angle: ").Append(groundAngle);
-
-        DebugManager.Instance?.SetDebugText(sb.ToString());
+        string debugText = $"Grounded: {grounded}\n" +
+                          $"Climbing: {climbing}\n" +
+                          $"Sliding: {sliding}\n" +
+                          $"Jumping: {jumping}\n" +
+                          $"Falling: {falling}\n" +
+                          $"Ground Time: {Time.time - groundTime:F2}s\n" +
+                          $"Land Time: {Time.time - landTime:F2}s\n" +
+                          $"Jump Time: {Time.time - jumpTime:F2}s\n" +
+                          $"Position: {transform.position}\n" +
+                          $"Velocity: {rb.linearVelocity}\n" +
+                          $"Target: {TargetMovement}\n" +
+                          $"Ground Angle: {groundAngle}";
+        
+        DebugManager.Instance?.SetDebugText(debugText);
     }
-#else
-    private void UpdateDebugInfo() { }
-#endif
 }
