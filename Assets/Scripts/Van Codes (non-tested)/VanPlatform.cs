@@ -17,7 +17,7 @@ public class VanPlatform : MonoBehaviour
         if (other.CompareTag("Player"))
         {
             isPlayerOnVan = true;
-            other.transform.SetParent(transform);
+            // No SetParent - PlayerPlatformMotion handles motion via CharacterController.Move()
         }
     }
 
@@ -26,8 +26,7 @@ public class VanPlatform : MonoBehaviour
         if (other.CompareTag("Player"))
         {
             isPlayerOnVan = false;
-            // Oyuncuyu platformdan ayır
-            other.transform.SetParent(null);
+            // No SetParent removal needed - motion handled by PlayerPlatformMotion
         }
     }
 
